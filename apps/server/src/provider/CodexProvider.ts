@@ -20,6 +20,7 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as CodexClient from "effect-codex-app-server/client";
 import * as CodexSchema from "effect-codex-app-server/schema";
 import * as CodexErrors from "effect-codex-app-server/errors";
+import { HttpClient } from "effect/http";
 
 import type {
   CodexSettings,
@@ -40,6 +41,7 @@ import {
 } from "@t3tools/shared/model";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { codexAppServerArgs, resolveCodexLaunchArgs } from "./codexLaunchArgs.ts";
+import { codexProxyUsageRequest, readCodexProxyUsage } from "./codexProxyUsage.ts";
 import {
   buildServerProvider,
   COMPACT_SLASH_COMMAND,
@@ -139,6 +141,7 @@ export const codexRoutesSpendNativeQuota = (
 const CODEX_APP_SERVER_PROBE_FORCE_KILL_AFTER = "2 seconds" as const;
 const CODEX_CATALOG_REFRESH_TIMEOUT_MS = 3_000;
 const CODEX_CONFIG_PROBE_TIMEOUT_MS = 3_000;
+const CODEX_PROXY_USAGE_TIMEOUT_MS = 5_000;
 const CODEX_CATALOG_REFRESH_POLL = "100 millis" as const;
 const CODEX_CLIENT_NAME = "T3 Code";
 // Handshake plus account/models/skills requests can exceed the shared 10s probe budget.
@@ -158,6 +161,11 @@ export interface CodexAppServerProviderSnapshot {
   readonly account: CodexSchema.V2GetAccountResponse;
   readonly endpoint?: string | undefined;
   readonly nativeUsage?: boolean;
+  /** Identity a ChatGPT-backend proxy reported when Codex itself has no login. */
+  readonly proxyAccount?: {
+    readonly email: string | undefined;
+    readonly planType: string | undefined;
+  };
   readonly rateLimits?: CodexRateLimitsProbe;
   readonly version: string | undefined;
   readonly models: ReadonlyArray<ServerProviderModel> | undefined;
@@ -768,45 +776,70 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
 
   // Optional discovery must finish before the outer timeout can discard the account result.
   const deadlineMs = spawnedAtMs + input.probeTimeoutMs - CODEX_DISCOVERY_MARGIN_MS;
-  const [skillsResponse, models, { config, nativeUsage, rateLimits }] = yield* Effect.all(
-    [
-      withCodexDiscoveryDeadline(client.request("skills/list", { cwds: [input.cwd] }), deadlineMs),
-      accountResponse.account?.type === "chatgpt"
-        ? requestCodexChatGptModels({
-            client,
-            codexHome: initialize.codexHome,
-            spawnedAtMs,
-            deadlineMs,
-          })
-        : withCodexDiscoveryDeadline(requestAllCodexModels(client), deadlineMs),
-      // The shared catalog must exclude config from the server's launch project.
-      withCodexDiscoveryDeadline(
-        client.request("config/read", { includeLayers: false }),
-        deadlineMs,
-        CODEX_CONFIG_PROBE_TIMEOUT_MS,
-      ).pipe(
-        Effect.catch(() => Effect.logDebug("Codex config read failed.").pipe(Effect.as(undefined))),
-        Effect.flatMap((config) => {
-          // Only a confirmed native route may probe or publish the login's quota.
-          const nativeUsage =
-            !input.skipNativeUsage &&
-            config !== undefined &&
-            codexRoutesSpendNativeQuota(accountResponse, config.config);
-          const readUsage: Effect.Effect<CodexRateLimitsProbe | undefined> = nativeUsage
-            ? readCodexRateLimits(client, deadlineMs)
-            : Effect.undefined;
-          return readUsage.pipe(
-            Effect.map((rateLimits) => ({
-              config: config?.config,
-              nativeUsage,
-              rateLimits,
-            })),
-          );
-        }),
-      ),
-    ],
-    { concurrency: "unbounded" },
-  );
+  const [skillsResponse, models, { config, nativeUsage, rateLimits, proxyAccount }] =
+    yield* Effect.all(
+      [
+        withCodexDiscoveryDeadline(
+          client.request("skills/list", { cwds: [input.cwd] }),
+          deadlineMs,
+        ),
+        accountResponse.account?.type === "chatgpt"
+          ? requestCodexChatGptModels({
+              client,
+              codexHome: initialize.codexHome,
+              spawnedAtMs,
+              deadlineMs,
+            })
+          : withCodexDiscoveryDeadline(requestAllCodexModels(client), deadlineMs),
+        // The shared catalog must exclude config from the server's launch project.
+        withCodexDiscoveryDeadline(
+          client.request("config/read", { includeLayers: false }),
+          deadlineMs,
+          CODEX_CONFIG_PROBE_TIMEOUT_MS,
+        ).pipe(
+          Effect.catch(() =>
+            Effect.logDebug("Codex config read failed.").pipe(Effect.as(undefined)),
+          ),
+          Effect.flatMap((config) => {
+            // Only a confirmed native route may probe or publish the login's quota.
+            const nativeUsage =
+              !input.skipNativeUsage &&
+              config !== undefined &&
+              codexRoutesSpendNativeQuota(accountResponse, config.config);
+            const proxyRequest =
+              !nativeUsage && !input.skipNativeUsage && config !== undefined
+                ? codexProxyUsageRequest(config.config, input.environment ?? process.env)
+                : undefined;
+            type UsageRead = {
+              readonly rateLimits: CodexRateLimitsProbe | undefined;
+              readonly proxyAccount: CodexAppServerProviderSnapshot["proxyAccount"];
+            };
+            const readUsage: Effect.Effect<UsageRead, never, HttpClient.HttpClient> = proxyRequest
+              ? withCodexDiscoveryDeadline(
+                  readCodexProxyUsage(proxyRequest, CODEX_PROXY_USAGE_TIMEOUT_MS),
+                  deadlineMs,
+                ).pipe(
+                  Effect.map((usage): UsageRead =>
+                    usage
+                      ? {
+                          rateLimits: { snapshot: usage.snapshot, resetCredits: undefined },
+                          proxyAccount: { email: usage.email, planType: usage.planType },
+                        }
+                      : { rateLimits: undefined, proxyAccount: undefined },
+                  ),
+                )
+              : Effect.map(
+                  nativeUsage ? readCodexRateLimits(client, deadlineMs) : Effect.undefined,
+                  (rateLimits): UsageRead => ({ rateLimits, proxyAccount: undefined }),
+                );
+            return readUsage.pipe(
+              Effect.map((usage) => ({ config: config?.config, nativeUsage, ...usage })),
+            );
+          }),
+        ),
+      ],
+      { concurrency: "unbounded" },
+    );
 
   const cyberAccess = Option.getOrUndefined(decodeCodexCyberAccessConfig(config));
   return {
@@ -814,6 +847,7 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
     endpoint: config ? codexCustomEndpoint(config) : undefined,
     nativeUsage,
     ...(rateLimits ? { rateLimits } : {}),
+    ...(proxyAccount ? { proxyAccount } : {}),
     version,
     models,
     serviceTier: config?.service_tier ?? undefined,
@@ -1022,14 +1056,21 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
   }) => Effect.Effect<
     CodexAppServerProviderSnapshot,
     CodexErrors.CodexAppServerError,
-    ChildProcessSpawner.ChildProcessSpawner | FileSystem.FileSystem | Path.Path | Scope.Scope
+    | ChildProcessSpawner.ChildProcessSpawner
+    | FileSystem.FileSystem
+    | HttpClient.HttpClient
+    | Path.Path
+    | Scope.Scope
   > = probeCodexAppServerProvider,
   environment?: NodeJS.ProcessEnv,
   managedAuth?: ServerProvider["auth"],
 ): Effect.fn.Return<
   ServerProviderDraft,
   ServerSettingsError,
-  ChildProcessSpawner.ChildProcessSpawner | FileSystem.FileSystem | Path.Path
+  | ChildProcessSpawner.ChildProcessSpawner
+  | FileSystem.FileSystem
+  | HttpClient.HttpClient
+  | Path.Path
 > {
   const resolvedEnvironment = providerProbeEnvironment(environment ?? process.env);
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
@@ -1122,17 +1163,28 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
   }
 
   const snapshot = probeResult.success.value;
+  const proxyAccount = snapshot.account.account ? undefined : snapshot.proxyAccount;
   const accountStatus = managedAuth
     ? { status: "ready" as const, auth: managedAuth, message: undefined }
-    : accountProbeStatus(
-        snapshot,
-        codexSettings.homePath
-          ? expandHomePath(codexSettings.homePath, yield* HostProcess.HomeDirectory)
-          : undefined,
-      );
+    : proxyAccount
+      ? {
+          status: "ready" as const,
+          auth: {
+            status: "authenticated" as const,
+            label: `${codexPlanLabel(proxyAccount.planType) ?? "ChatGPT"} (proxy)`,
+            ...(proxyAccount.email ? { email: proxyAccount.email } : {}),
+          },
+          message: undefined,
+        }
+      : accountProbeStatus(
+          snapshot,
+          codexSettings.homePath
+            ? expandHomePath(codexSettings.homePath, yield* HostProcess.HomeDirectory)
+            : undefined,
+        );
   // Sign-in guidance still applies when Codex itself says it needs an OpenAI login.
   const usageLimits =
-    !snapshot.nativeUsage && !accountStatus.message
+    !snapshot.nativeUsage && !proxyAccount && !accountStatus.message
       ? makeUnavailableUsageLimits({ checkedAt, reason: "unsupported" })
       : snapshot.rateLimits === undefined || "failure" in snapshot.rateLimits
         ? makeUnavailableUsageLimits({

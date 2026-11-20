@@ -619,6 +619,19 @@ const probeClaudeCapabilities = (
 
 type ClaudeCapabilitiesProbeError = Effect.Error<ReturnType<typeof probeClaudeCapabilities>>;
 
+/**
+ * reclaude (`rec`, `recx`) wraps Claude Code and routes its traffic through the
+ * selected organization. Its own subcommands, `--version` included, shadow
+ * Claude's, so direct CLI commands go through `reclaude cli`; SDK sessions pass
+ * only flags, which it forwards unchanged.
+ */
+const RECLAUDE_BINARY_NAMES: ReadonlySet<string> = new Set(["reclaude", "rec", "recx"]);
+
+function isReclaudeBinaryPath(binaryPath: string): boolean {
+  const name = binaryPath.trim().split(/[\\/]/u).pop() ?? "";
+  return RECLAUDE_BINARY_NAMES.has(name.toLowerCase().replace(/\.exe$/u, ""));
+}
+
 const runClaudeCommand = Effect.fn("runClaudeCommand")(function* (
   claudeSettings: ClaudeSettings,
   args: ReadonlyArray<string>,
@@ -626,7 +639,8 @@ const runClaudeCommand = Effect.fn("runClaudeCommand")(function* (
   cwd?: string,
 ) {
   const claudeEnvironment = yield* makeClaudeEnvironment(claudeSettings, environment);
-  const spawnCommand = yield* resolveSpawnCommand(claudeSettings.binaryPath, args, {
+  const cliArgs = isReclaudeBinaryPath(claudeSettings.binaryPath) ? ["cli", ...args] : args;
+  const spawnCommand = yield* resolveSpawnCommand(claudeSettings.binaryPath, cliArgs, {
     env: claudeEnvironment,
   });
   const command = ChildProcess.make(spawnCommand.command, spawnCommand.args, {
@@ -826,9 +840,11 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   }
 
   // First-party account fields cannot verify custom endpoint credentials.
-  const baseUrl =
-    (yield* readClaudeSettingsEnv(claudeSettings, cwd, resolvedEnvironment)).ANTHROPIC_BASE_URL ??
-    resolvedEnvironment.ANTHROPIC_BASE_URL;
+  // reclaude replaces the configured endpoint with its own route, so its account fields hold.
+  const baseUrl = isReclaudeBinaryPath(claudeSettings.binaryPath)
+    ? undefined
+    : ((yield* readClaudeSettingsEnv(claudeSettings, cwd, resolvedEnvironment))
+        .ANTHROPIC_BASE_URL ?? resolvedEnvironment.ANTHROPIC_BASE_URL);
   const customApiEndpoint = customClaudeApiEndpointHost(baseUrl) !== undefined;
   const endpoint = customApiEndpoint ? URL.parse(baseUrl?.trim() ?? "")?.origin : undefined;
   if (!customApiEndpoint && claudeAuthStatus(capabilities) === "unauthenticated") {

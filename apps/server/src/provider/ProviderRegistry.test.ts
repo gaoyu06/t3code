@@ -584,6 +584,55 @@ it.layer(
   Layer.mergeAll(layerTestNodeServices, ServerSettingsModule.layerTest(), layerTestHttpClient),
 )("ProviderRegistry", (it) => {
   describe("checkCodexProviderStatus", () => {
+    it.effect("reports a ChatGPT-backend proxy's account and usage when Codex has no login", () =>
+      Effect.gen(function* () {
+        const status = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
+          Effect.succeed(
+            makeCodexProbeSnapshot({
+              account: { account: null, requiresOpenaiAuth: false },
+              endpoint: "http://127.0.0.1:57721",
+              nativeUsage: false,
+              proxyAccount: { email: "lease@example.com", planType: "pro" },
+              rateLimits: {
+                snapshot: {
+                  planType: "pro",
+                  primary: { usedPercent: 2, windowDurationMins: 10080, resetsAt: 1795574382 },
+                  secondary: null,
+                },
+                resetCredits: undefined,
+              },
+            }),
+          ),
+        );
+        assert.strictEqual(status.status, "ready");
+        assert.strictEqual(status.auth.status, "authenticated");
+        assert.strictEqual(status.auth.label, "ChatGPT Pro 200 Subscription (proxy)");
+        assert.strictEqual(status.auth.email, "lease@example.com");
+        assert.strictEqual(status.auth.endpoint, "http://127.0.0.1:57721");
+        assert.strictEqual(status.usageLimits?.unavailable, undefined);
+        assert.deepStrictEqual(
+          status.usageLimits?.windows.map((window) => [window.kind, window.usedPercent]),
+          [["weekly", 2]],
+        );
+      }),
+    );
+
+    it.effect("keeps a custom provider without proxy usage unsupported", () =>
+      Effect.gen(function* () {
+        const status = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
+          Effect.succeed(
+            makeCodexProbeSnapshot({
+              account: { account: null, requiresOpenaiAuth: false },
+              endpoint: "http://127.0.0.1:57721",
+              nativeUsage: false,
+            }),
+          ),
+        );
+        assert.strictEqual(status.auth.status, "unknown");
+        assert.strictEqual(status.usageLimits?.unavailable?.reason, "unsupported");
+      }),
+    );
+
     it.effect("uses the app-server account and model list for provider status", () =>
       Effect.gen(function* () {
         const status = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
@@ -4743,6 +4792,34 @@ it.layer(
           layerMockSpawner((args) => {
             const joined = args.join(" ");
             if (joined === "--version") return { stdout: "1.0.0\n", stderr: "", code: 0 };
+            throw new Error(`Unexpected args: ${joined}`);
+          }),
+        ),
+      ),
+    );
+
+    it.effect("reads reclaude's Claude version and organization subscription", () =>
+      Effect.gen(function* () {
+        const status = yield* checkClaudeProviderStatus(
+          { ...defaultClaudeSettings, binaryPath: "/Users/test/.local/bin/reclaude" },
+          claudeCapabilities({
+            email: "team@example.com",
+            subscriptionType: "Claude Team",
+            apiProvider: "firstParty",
+          }),
+          { ANTHROPIC_BASE_URL: "https://proxy.example/api" },
+        );
+        assert.strictEqual(status.version, "2.1.328");
+        assert.strictEqual(status.status, "ready");
+        assert.strictEqual(status.auth.label, "Claude Team Subscription");
+        assert.strictEqual(status.auth.endpoint, undefined);
+      }).pipe(
+        Effect.provide(
+          layerMockSpawner((args) => {
+            const joined = args.join(" ");
+            if (joined === "cli --version")
+              return { stdout: "2.1.328 (Claude Code)\n", stderr: "", code: 0 };
+            if (joined === "--version") return { stdout: "v1.7.4\n", stderr: "", code: 0 };
             throw new Error(`Unexpected args: ${joined}`);
           }),
         ),
