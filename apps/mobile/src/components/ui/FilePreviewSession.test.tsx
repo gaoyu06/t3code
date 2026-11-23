@@ -26,6 +26,7 @@ const harness = vi.hoisted(() => ({
   previews: [] as unknown[],
   mounts: 0,
   presentationFinished: false,
+  platform: { OS: "android", Version: 35 },
 }));
 
 vi.mock("../../state/assets", () => ({
@@ -77,7 +78,7 @@ vi.mock("expo-clipboard", () => ({ setStringAsync: vi.fn() }));
 vi.mock("expo-haptics", () => ({ notificationAsync: vi.fn() }));
 vi.mock("react-native", () => ({
   Modal: () => null,
-  Platform: { OS: "android", Version: 35 },
+  Platform: harness.platform,
   View: ({ children }: { children: ReactNode }) => children,
 }));
 vi.mock("react-native-safe-area-context", () => ({ useSafeAreaInsets: () => ({ top: 0 }) }));
@@ -419,3 +420,47 @@ it("does not carry a presented viewer over to a different item that is still res
     harness.refreshAssetUrl.mock.calls.filter(([, r]) => r.url.endsWith("b.pdf")),
   ).toHaveLength(1);
 });
+
+it.each(["downloads", "is cancelled"] as const)(
+  "opens an iOS PDF from a local copy once it downloads, and closes quietly when it %s",
+  async (outcome) => {
+    harness.platform.OS = "ios";
+    try {
+      harness.refreshAssetUrl.mockReset().mockResolvedValue("https://signed.test/report.pdf");
+      const dispose = vi.fn();
+      harness.download
+        .mockReset()
+        .mockResolvedValue(
+          outcome === "downloads"
+            ? { uri: "file:///cache/report.pdf", share: vi.fn(), dispose }
+            : null,
+        );
+      const selected: FilePreviewItem = {
+        ...image("https://github.com/report.pdf"),
+        kind: "pdf",
+        name: "report.pdf",
+      };
+      await using preview = await openGallery(selected, [selected], true);
+
+      expect(harness.download).toHaveBeenCalledWith(
+        expect.objectContaining({
+          url: "https://signed.test/report.pdf",
+          attachment: { name: "report.pdf", mimeType: "application/octet-stream" },
+        }),
+      );
+      expect(harness.alert).not.toHaveBeenCalled();
+      if (outcome === "downloads") {
+        expect(harness.previews.at(-1)).toMatchObject({
+          kind: "pdf",
+          uri: "file:///cache/report.pdf",
+        });
+        expect(preview.onRequestClose).not.toHaveBeenCalled();
+      } else {
+        expect(harness.previews).toHaveLength(0);
+        expect(preview.onRequestClose).toHaveBeenCalledOnce();
+      }
+    } finally {
+      harness.platform.OS = "android";
+    }
+  },
+);

@@ -4,6 +4,7 @@ import type { SharingOptions } from "expo-sharing";
 import { msg } from "gt-react-native";
 
 import { m } from "../i18n/messages";
+import { beginAttachmentDownload } from "./attachmentDownloadProgress";
 import { beginForegroundHandoff } from "./foreground-handoff";
 import { uuidv4 } from "./uuid";
 
@@ -162,6 +163,37 @@ async function createCachedAttachmentFile(attachment: AttachmentFileMetadata) {
   };
 }
 
+/**
+ * Downloads with a progress notice the user can cancel from. Returns false when the caller's
+ * signal or that notice cancelled it.
+ */
+async function downloadWithProgress(input: {
+  readonly url: string;
+  readonly file: InstanceType<typeof import("expo-file-system").File>;
+  readonly name: string;
+  readonly signal: AbortSignal;
+}): Promise<boolean> {
+  const { File } = await import("expo-file-system");
+  const controller = new AbortController();
+  const forwardAbort = () => controller.abort();
+  if (input.signal.aborted) return false;
+  input.signal.addEventListener("abort", forwardAbort, { once: true });
+  const activity = beginAttachmentDownload(input.name, forwardAbort);
+  try {
+    await File.downloadFileAsync(input.url, input.file, {
+      signal: controller.signal,
+      onProgress: ({ bytesWritten, totalBytes }) => activity.update(bytesWritten, totalBytes),
+    });
+    return !controller.signal.aborted;
+  } catch (cause) {
+    if (controller.signal.aborted) return false;
+    throw cause;
+  } finally {
+    activity.end();
+    input.signal.removeEventListener("abort", forwardAbort);
+  }
+}
+
 export function nativeViewerErrorMessage(cause: unknown): string {
   const text = cause instanceof Error ? cause.message : String(cause);
   return /ActivityNotFound|cannot be previewed/i.test(text)
@@ -182,7 +214,13 @@ export async function openAttachmentInViewer(input: {
     if (/^(file|content):/.test(input.uri)) {
       await new File(input.uri).copy(cached.file);
     } else {
-      await File.downloadFileAsync(input.uri, cached.file, { signal: input.signal });
+      const downloaded = await downloadWithProgress({
+        url: input.uri,
+        file: cached.file,
+        name: input.attachment.name,
+        signal: input.signal,
+      });
+      if (!downloaded) return;
     }
     if (input.signal.aborted) return;
     const endHandoff = beginForegroundHandoff();
@@ -209,15 +247,15 @@ export async function downloadAttachmentForPreview(input: {
   readonly signal: AbortSignal;
 }): Promise<AttachmentPreviewFile | null> {
   if (input.signal.aborted) return null;
-  const { File } = await import("expo-file-system");
   const cached = await createCachedAttachmentFile(input.attachment);
   try {
-    if (input.signal.aborted) {
-      cached.preview.dispose();
-      return null;
-    }
-    await File.downloadFileAsync(input.url, cached.file, { signal: input.signal });
-    if (input.signal.aborted) {
+    const downloaded = await downloadWithProgress({
+      url: input.url,
+      file: cached.file,
+      name: input.attachment.name,
+      signal: input.signal,
+    });
+    if (!downloaded || input.signal.aborted) {
       cached.preview.dispose();
       return null;
     }

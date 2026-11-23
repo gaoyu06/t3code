@@ -9,6 +9,8 @@ import { webViewDecelerationRate } from "../lib/webViewDecelerationRate";
 export function PdfPreview(props: { readonly uri: string }) {
   const gt = useGT();
   const [error, setError] = useState<string | null>(null);
+  // WebKit reports a PDF's download progress; zero means nothing has arrived yet.
+  const [progress, setProgress] = useState(0);
   return (
     <View className="flex-1 bg-card">
       {error ? (
@@ -21,6 +23,7 @@ export function PdfPreview(props: { readonly uri: string }) {
         decelerationRate={webViewDecelerationRate}
         contentInsetAdjustmentBehavior="never"
         startInLoadingState
+        onLoadProgress={(event) => setProgress(event.nativeEvent.progress)}
         onError={(event) =>
           setError(event.nativeEvent.description || gt("The PDF could not be loaded."))
         }
@@ -32,7 +35,11 @@ export function PdfPreview(props: { readonly uri: string }) {
           )
         }
         renderLoading={() => (
-          <FilePreviewLoading message={gt("Loading PDF...")} background="card" />
+          <FilePreviewLoading
+            message={gt("Loading PDF...")}
+            background="card"
+            {...(progress > 0 ? { progress } : {})}
+          />
         )}
         style={{ flex: 1, backgroundColor: "transparent" }}
       />

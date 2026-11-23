@@ -5618,5 +5618,7 @@
   "856812e7e1fc445e": "Tool-Aufrufe im Chat",
   "8d545d54c0a9e950": "Die Befehle, Bearbeitungen und Suchen ausblenden, die Agenten ausführen. „Erfolgreiche ausblenden“ behält Fehler. „Zen“ zeigt nur endgültige Antworten. Genehmigungen, Fragen und Fehler werden immer angezeigt.",
   "99d51127f573296b": "Weiteres Konto",
-  "8ec2c57414669b79": "Verbinde einen zweiten {tracker}-Workspace oder -Nutzer."
+  "8ec2c57414669b79": "Verbinde einen zweiten {tracker}-Workspace oder -Nutzer.",
+  "ce9f6e5e1a6cef84": "Wird geladen · {received}",
+  "e4f9836db2fa2db6": "Wird geladen · {received} von {total}"
 }

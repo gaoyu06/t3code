@@ -2,11 +2,14 @@ import { View } from "react-native";
 
 import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
 import { AppText as Text } from "../../components/ui/AppText";
+import { Progress } from "../../components/ui/Progress";
 import { cn } from "../../lib/cn";
 
 export function FilePreviewLoading(props: {
   readonly message: string;
   readonly background?: "sheet" | "card";
+  /** Fraction loaded, when the loader reports it. */
+  readonly progress?: number;
 }) {
   return (
     <View
@@ -17,6 +20,9 @@ export function FilePreviewLoading(props: {
     >
       <AppActivityIndicator />
       <Text className="text-center text-sm text-foreground-muted">{props.message}</Text>
+      {props.progress !== undefined ? (
+        <Progress className="w-40" label={props.message} value={props.progress} />
+      ) : null}
     </View>
   );
 }

@@ -3,10 +3,12 @@ import * as Schema from "effect/Schema";
 import { msg, useGT } from "gt-react-native";
 import * as Dialog from "./Dialog";
 import { useContext, useEffect, useEffectEvent, useState, type ComponentType } from "react";
+import { Platform } from "react-native";
 
 import { loadLocalAttachmentPreview } from "../../lib/localAttachmentPreview";
 import {
   downloadAndShareAttachment,
+  downloadAttachmentForPreview,
   nativeViewerErrorMessage,
   shareLocalAttachment,
 } from "../../lib/attachmentDownload";
@@ -61,11 +63,49 @@ interface ResolvedPreviewUri {
   readonly dispose?: () => void;
 }
 
+/**
+ * iOS hands documents to Quick Look, which shows nothing while a remote file downloads, so they
+ * download here first with a progress notice and open from the local copy.
+ */
+function downloadsBeforeViewing(item: FilePreviewItem): boolean {
+  return Platform.OS === "ios" && item.kind !== "image";
+}
+
+const isRemoteUri = (uri: string) => /^https?:/i.test(uri);
+
+async function downloadForViewer(
+  item: FilePreviewItem,
+  url: string,
+  signal: AbortSignal,
+): Promise<ResolvedPreviewUri | null> {
+  const file = await downloadAttachmentForPreview({
+    url,
+    attachment: {
+      name: filePreviewName(item),
+      mimeType: item.mimeType ?? "application/octet-stream",
+    },
+    signal,
+  }).catch((error: unknown) => {
+    throw new PreviewResolutionError({
+      cause: error,
+      fallbackMessage: error instanceof Error ? error.message : m(msg("Try again.")),
+    });
+  });
+  return file && { uri: file.uri, dispose: file.dispose };
+}
+
+/** Whether the item is ready to show without resolving or downloading it first. */
+function isPreResolved(item: FilePreviewItem): boolean {
+  return "uri" in item && !(downloadsBeforeViewing(item) && isRemoteUri(item.uri));
+}
+
 async function resolvePreviewUri(
   item: FilePreviewItem,
   signal: AbortSignal,
 ): Promise<ResolvedPreviewUri | null> {
-  if ("uri" in item) return { uri: item.uri };
+  if ("uri" in item) {
+    return isPreResolved(item) ? { uri: item.uri } : downloadForViewer(item, item.uri, signal);
+  }
   if ("attachment" in item) {
     return loadLocalAttachmentPreview(item.attachment, signal).catch((error: unknown) => {
       throw new PreviewResolutionError({
@@ -86,6 +126,7 @@ async function resolvePreviewUri(
         fallbackMessage: remotePreviewFailureMessage(error),
       });
     });
+  if (downloadsBeforeViewing(item)) return downloadForViewer(item, url, signal);
   return { uri: url + (item.srcFragment ?? "") };
 }
 
@@ -117,13 +158,15 @@ function ResolvedFilePreview(
   const selectedIndex = items.findIndex((item) => filePreviewKey(item) === selectedKey);
   // Undefined while resolving, null once it cannot be.
   const [uris, setUris] = useState<readonly (string | null | undefined)[]>(() =>
-    items.map((item) => ("uri" in item ? item.uri : undefined)),
+    items.map((item) => ("uri" in item && isPreResolved(item) ? item.uri : undefined)),
   );
   const onResolutionError = useEffectEvent((error: PreviewResolutionError) => {
     if (props.onOpenError) props.onOpenError(error.cause);
     else Dialog.alert(gt("Could not open preview"), error.fallbackMessage);
     props.onRequestClose();
   });
+  // Cancelling the download from its progress notice closes the preview without an alert.
+  const onSelectedCanceled = useEffectEvent(() => props.onRequestClose());
   // Resolves once per presentation and holds local file leases until it closes.
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- resolves preview files and holds their local file leases until the preview closes
   useEffect(() => {
@@ -132,11 +175,14 @@ function ResolvedFilePreview(
     const settle = (index: number, uri: string | null) =>
       setUris((current) => current.map((value, at) => (at === index ? uri : value)));
     items.forEach((item, index) => {
-      if ("uri" in item) return;
+      if (isPreResolved(item)) return;
       void resolvePreviewUri(item, controller.signal).then(
         (resolved) => {
           if (controller.signal.aborted) return resolved?.dispose?.();
           if (resolved?.dispose) leases.push(resolved.dispose);
+          if (!resolved && index === selectedIndex && item.kind !== "image") {
+            return onSelectedCanceled();
+          }
           settle(index, resolved?.uri ?? null);
         },
         (error: unknown) => {

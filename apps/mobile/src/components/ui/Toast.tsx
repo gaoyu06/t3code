@@ -30,6 +30,8 @@ export type ToastProps = {
   readonly singleLine?: boolean;
   readonly tone?: "default" | "success" | "danger";
   readonly busy?: boolean;
+  /** Fraction complete for a busy toast; omitted when the work has no known size. */
+  readonly progress?: number;
   readonly action?: { readonly label: string; readonly onPress: () => void };
 } & (
   | { readonly dismissMode: "swipe"; readonly onDismiss: () => void }
@@ -116,6 +118,23 @@ function ToastContent(props: ToastProps & { readonly glassReady?: boolean }) {
           />
         ) : null}
       </View>
+      {props.busy && props.progress !== undefined ? (
+        // A plain bar: the SwiftUI ProgressView does not draw inside FullWindowOverlay.
+        <View
+          accessible
+          accessibilityRole="progressbar"
+          accessibilityValue={{ min: 0, max: 100, now: Math.round(props.progress * 100) }}
+          className={cn(
+            "h-1 overflow-hidden rounded-full bg-primary/20",
+            Platform.OS === "ios" ? "mx-3 mb-1 mt-2" : "mt-3",
+          )}
+        >
+          <View
+            className="h-full rounded-full bg-primary"
+            style={{ width: `${Math.min(1, Math.max(0, props.progress)) * 100}%` }}
+          />
+        </View>
+      ) : null}
       {action && !inlineAction ? <View className="mt-2 self-end">{action}</View> : null}
     </GlassSurface>
   );

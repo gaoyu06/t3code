@@ -76,6 +76,7 @@ import {
   downloadAttachmentForPreview,
   shareLocalAttachment,
 } from "./attachmentDownload";
+import { currentAttachmentDownload } from "./attachmentDownloadProgress";
 import { isForegroundHandoffActive } from "./foreground-handoff";
 
 const NOW = 1_787_990_400_000;
@@ -121,7 +122,10 @@ describe("downloadAndShareAttachment", () => {
     expect(mocks.download).toHaveBeenCalledWith(
       input.url,
       expect.objectContaining({ uri: expect.stringMatching(/\/report\.pdf$/) }),
-      { signal: controller.signal },
+      expect.objectContaining({
+        signal: expect.any(AbortSignal),
+        onProgress: expect.any(Function),
+      }),
     );
     expect(mocks.share).toHaveBeenCalledWith(
       expect.stringMatching(/^file:\/\/\/cache\/.+\/report\.pdf$/),
@@ -185,6 +189,47 @@ describe("downloadAndShareAttachment", () => {
     await task;
     expect(mocks.deleted).toHaveBeenCalledTimes(1);
     expect(mocks.share).not.toHaveBeenCalled();
+  });
+
+  it("shows progress for a slow download and ends quietly when it is cancelled there", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const started = Promise.withResolvers<void>();
+      mocks.download.mockImplementation(
+        (
+          _url: string,
+          _file: unknown,
+          options: {
+            signal: AbortSignal;
+            onProgress: (progress: { bytesWritten: number; totalBytes: number }) => void;
+          },
+        ) => {
+          options.onProgress({ bytesWritten: 3_000_000, totalBytes: 12_000_000 });
+          started.resolve();
+          return new Promise((_resolve, reject) =>
+            options.signal.addEventListener("abort", () => reject(new Error("AbortError"))),
+          );
+        },
+      );
+      const task = downloadAndShareAttachment({ ...input, signal: new AbortController().signal });
+      await started.promise;
+      expect(currentAttachmentDownload()).toBeNull();
+      vi.advanceTimersByTime(300);
+      const activity = currentAttachmentDownload();
+      expect(activity).toMatchObject({
+        name: "report.pdf",
+        bytesWritten: 3_000_000,
+        totalBytes: 12_000_000,
+      });
+
+      activity!.cancel();
+      await expect(task).resolves.toBeUndefined();
+      expect(currentAttachmentDownload()).toBeNull();
+      expect(mocks.share).not.toHaveBeenCalled();
+      expect(mocks.deleted).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("retains an export when its row unmounts during the native handoff", async () => {
