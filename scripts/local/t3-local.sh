@@ -1,11 +1,11 @@
 #!/bin/zsh
 # 本地 fork 版 T3 Code 的同步、构建与安装。
-#   t3-local.sh build [vX.Y.Z]  变基到官方正式版（默认最新）、装依赖、测试、构建、签名
+#   t3-local.sh build           合并官方 main、装依赖、测试、构建、签名（自用分支 personal，桌面和手机共用）
 #   t3-local.sh install         退出 T3、备份并替换 /Applications 里的应用、重新打开
 set -euo pipefail
 
 REPO="$HOME/dev/t3code"
-BRANCH="recodex-compat"
+BRANCH="personal"
 OUT="$REPO/release-local"
 APP_NAME="T3 Code (Beta)"
 INSTALLED="/Applications/$APP_NAME.app"
@@ -25,13 +25,9 @@ build() {
   [[ -z "$(git status --porcelain --untracked-files=no)" ]] || { echo "工作区有未提交改动，先处理" >&2; exit 1; }
   git checkout -q "$BRANCH"
   git fetch -q upstream --tags
-  local old_base new_base
-  old_base=$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude '*-*' HEAD)
-  new_base=${1:-$(stable_tag)}
-  if [[ "$old_base" != "$new_base" ]]; then
-    echo "变基：$old_base -> $new_base"
-    git rebase --onto "$new_base" "$old_base" "$BRANCH"
-  fi
+  git merge -q --no-edit upstream/main
+  local new_base
+  new_base=$(stable_tag)
   local version=${new_base#v}
 
   vp i
@@ -46,8 +42,8 @@ build() {
   codesign --force --deep --options runtime --timestamp=none \
     --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$app"
   codesign --verify --deep --strict "$app"
-  git push -q --force-with-lease origin "$BRANCH"
-  echo "构建完成：$app（基于 $new_base）"
+  git push -q origin "$BRANCH"
+  echo "构建完成：$app（合并官方 main，版本号沿用 $new_base）"
 }
 
 install_app() {
@@ -67,7 +63,7 @@ install_app() {
 }
 
 case "${1:-}" in
-  build) shift; build "$@" ;;
+  build) build ;;
   install) install_app ;;
-  *) echo "用法：$0 build [vX.Y.Z] | install" >&2; exit 2 ;;
+  *) echo "用法：$0 build | install" >&2; exit 2 ;;
 esac
