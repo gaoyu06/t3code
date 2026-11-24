@@ -1695,3 +1695,110 @@ it.effect(
     );
   },
 );
+
+it.effect("only a full-access outside client sees and decides permission requests", () => {
+  const shell = McpToolAccessTestkit.liveThreadShell(threadId);
+  const requestId = RuntimeRequestId.make("pending-approval");
+  const projection = McpToolAccessTestkit.idleThreadProjection(shell);
+  const dispatched: Array<OrchestrationV2ServerCommand> = [];
+  const outside: McpInvocationContext.McpInvocationScope = {
+    ...scope,
+    thread: undefined,
+    client: { sessionId: "bridge", label: "bridge", access: "full-access" },
+  };
+  const supervised: McpInvocationContext.McpInvocationScope = {
+    ...outside,
+    client: { sessionId: "agent", label: "agent", access: "approval-required" },
+  };
+  return Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    const call = (
+      args: Record<string, unknown>,
+      invocation: McpInvocationContext.McpInvocationScope,
+    ) =>
+      server
+        .callTool({ name: "t3_pending_request", arguments: { threadId, ...args } })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+    expect((yield* call({ action: "list" }, scope)).structuredContent).toEqual({ requestIds: [] });
+    expect((yield* call({ action: "list" }, outside)).structuredContent).toEqual({
+      requestIds: [],
+      approvalIds: [requestId],
+    });
+    expect((yield* call({ action: "read", requestId }, outside)).structuredContent).toEqual({
+      requestId,
+      approval: "command",
+      prompt: "rm -rf build",
+    });
+    expect(
+      declaredFailure(yield* call({ action: "decide", requestId, decision: "accept" }, scope)),
+    ).toMatchObject({ code: "capability_denied" });
+    // A supervised client is refused before the tool runs, for the full-access thread.
+    expect(
+      (yield* call({ action: "decide", requestId, decision: "accept" }, supervised)).isError,
+    ).toBe(true);
+    expect(dispatched).toEqual([]);
+    yield* call({ action: "decide", requestId, decision: "decline" }, outside);
+    expect(dispatched).toMatchObject([
+      { type: "runtime-request.respond", threadId, requestId, decision: "decline" },
+    ]);
+  }).pipe(
+    Effect.provide(
+      layerThreadToolkit.pipe(
+        Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
+        Layer.provide(NodeCrypto.layer),
+        Layer.provide(
+          Layer.mock(ThreadManagement.ThreadManagementService)({
+            getThreadShell: () => Effect.succeed(shell),
+            getProjectThreadRecords: () =>
+              Effect.succeed({
+                ...projection,
+                runtimeRequests: [
+                  {
+                    id: requestId,
+                    nodeId: NodeId.make("root"),
+                    providerTurnId: null,
+                    nativeRequestRef: null,
+                    kind: "command",
+                    status: "pending",
+                    responseCapability: { type: "message" },
+                    createdAt: shell.createdAt,
+                    resolvedAt: null,
+                  },
+                ],
+                turnItems: [
+                  {
+                    id: TurnItemId.make("pending-approval-item"),
+                    threadId,
+                    runId: null,
+                    nodeId: null,
+                    providerThreadId: null,
+                    providerTurnId: null,
+                    nativeItemRef: null,
+                    parentItemId: null,
+                    ordinal: 0,
+                    status: "pending",
+                    title: null,
+                    startedAt: shell.createdAt,
+                    completedAt: null,
+                    updatedAt: shell.updatedAt,
+                    type: "approval_request",
+                    requestId,
+                    requestKind: "command",
+                    prompt: "rm -rf build",
+                  },
+                ],
+              }),
+            dispatch: (command) =>
+              Effect.sync(() => {
+                dispatched.push(command as OrchestrationV2ServerCommand);
+                return { sequence: 1 } as never;
+              }),
+          }),
+        ),
+      ),
+    ),
+  );
+});

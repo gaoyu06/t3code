@@ -5,6 +5,7 @@ import {
   AuthStandardClientScopes,
 } from "@t3tools/contracts";
 import * as Console from "effect/Console";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -93,6 +94,13 @@ const baseUrlFlag = Flag.String("base-url").pipe(
   ),
   Flag.withDescription("Optional public base URL used to print a ready `/pair#token=...` link."),
   Flag.optional,
+);
+
+const mcpClientFlag = Flag.Boolean("mcp-client").pipe(
+  Flag.withDescription(
+    "Issue a full-access MCP client session for /mcp (30 days), as `t3 thread` does. Ignores --scope, --ttl and --subject.",
+  ),
+  Flag.withDefault(false),
 );
 
 const tokenOnlyFlag = Flag.Boolean("token-only").pipe(
@@ -296,6 +304,7 @@ const sessionIssueCommand = Command.make("issue", {
   ttl: ttlFlag,
   label: labelFlag,
   subject: subjectFlag,
+  mcpClient: mcpClientFlag,
   tokenOnly: tokenOnlyFlag,
   json: jsonFlag,
 }).pipe(
@@ -305,6 +314,20 @@ const sessionIssueCommand = Command.make("issue", {
       flags,
       (environmentAuth) =>
         Effect.gen(function* () {
+          if (flags.mcpClient) {
+            const issued = yield* environmentAuth.issueMcpClientSession({
+              label: Option.getOrElse(flags.label, () => "MCP client"),
+              access: "full-access",
+              peerLink: false,
+              client: { deviceType: "bot" },
+            });
+            // Revoke with `t3 auth session revoke <sessionId>`.
+            return yield* Console.log(
+              flags.tokenOnly
+                ? issued.token
+                : `session ${issued.sessionId}, expires ${DateTime.formatIso(issued.expiresAt)}\n${issued.token}`,
+            );
+          }
           const issued = yield* environmentAuth.issueSession({
             scopes: flags.scopes,
             ...(Option.isSome(flags.ttl) ? { ttl: flags.ttl.value } : {}),

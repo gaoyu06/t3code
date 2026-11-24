@@ -93,6 +93,51 @@ const readQuestion = Effect.fn("mcp.readQuestion")(function* (input: {
     });
   return { ...context, request, item };
 });
+const APPROVAL_KINDS: ReadonlySet<string> = new Set([
+  "command",
+  "file-read",
+  "file-change",
+  "mcp-elicitation",
+  "permission",
+]);
+/**
+ * A person's own full-access script or bot signed in to `/mcp` (`t3 auth session issue
+ * --mcp-client`): not an agent thread, not another environment's link. It can already start
+ * full-access threads, so deciding approvals gives it nothing more.
+ */
+const isOutsideClient = McpInvocationContext.McpInvocationContext.pipe(
+  Effect.map(
+    (scope) =>
+      scope.thread === undefined &&
+      scope.client !== undefined &&
+      scope.client.access === "full-access" &&
+      scope.client.linked !== true &&
+      scope.client.narrowedTo === undefined,
+  ),
+);
+const readApproval = Effect.fn("mcp.readApproval")(function* (input: {
+  threadId?: ThreadId | undefined;
+  requestId: RuntimeRequestId;
+}) {
+  const context = yield* readThread(input.threadId, ["runtimeRequests", "turnItems"]);
+  const request = context.projection.runtimeRequests.find(
+    (request) => request.id === input.requestId && APPROVAL_KINDS.has(request.kind),
+  );
+  const item = context.projection.turnItems.find(
+    (item) => item.type === "approval_request" && item.requestId === input.requestId,
+  );
+  if (request === undefined || item?.type !== "approval_request")
+    return yield* new OrchestratorMcpFailure({
+      code: "invalid_request",
+      message: "The pending permission request was not found.",
+    });
+  if (request.status !== "pending")
+    return yield* new OrchestratorMcpFailure({
+      code: "invalid_request",
+      message: `The permission request is no longer pending (${request.status}).`,
+    });
+  return { ...context, request, item };
+});
 /** A field the chosen action needs. `null` counts as given, as in `beforeRunId: null`. */
 const required = <A>(value: A | undefined, name: string) =>
   value === undefined
@@ -246,18 +291,44 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
     ),
   ),
   t3_pending_request: McpToolAccess.either(
-    (input) => input.action !== "respond",
+    (input) => input.action === "list" || input.action === "read",
     McpToolAccess.reads((input) =>
       Effect.gen(function* () {
+        const outside = yield* isOutsideClient;
         if (input.action === "list") {
           const { projection } = yield* readThread(input.threadId, ["runtimeRequests"]);
+          const pending = projection.runtimeRequests.filter(
+            (request) => request.status === "pending",
+          );
           return {
-            requestIds: projection.runtimeRequests
-              .filter((request) => request.kind === "user_input" && request.status === "pending")
+            requestIds: pending
+              .filter((request) => request.kind === "user_input")
               .map((request) => request.id),
+            ...(outside
+              ? {
+                  approvalIds: pending
+                    .filter((request) => APPROVAL_KINDS.has(request.kind))
+                    .map((request) => request.id),
+                }
+              : {}),
           };
         }
         const requestId = yield* required(input.requestId, "requestId");
+        if (outside) {
+          const found = yield* readApproval({ threadId: input.threadId, requestId }).pipe(
+            Effect.option,
+          );
+          if (found._tag === "Some") {
+            const { item } = found.value;
+            return {
+              requestId,
+              approval: item.requestKind,
+              ...(item.prompt === undefined ? {} : { prompt: item.prompt }),
+              ...(item.reason === undefined ? {} : { reason: item.reason }),
+              ...(item.options === undefined ? {} : { options: item.options }),
+            };
+          }
+        }
         const { item } = yield* readQuestion({ threadId: input.threadId, requestId });
         return { requestId, questions: item.questions };
       }),
@@ -265,6 +336,28 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
     writesThread((input) =>
       Effect.gen(function* () {
         const requestId = yield* required(input.requestId, "requestId");
+        if (input.action === "decide") {
+          if (!(yield* isOutsideClient))
+            return yield* new OrchestratorMcpFailure({
+              code: "capability_denied",
+              message: "Only a client outside T3 Code can decide a permission request.",
+            });
+          const decision = yield* required(input.decision, "decision");
+          const { threads, projection } = yield* readApproval({
+            threadId: input.threadId,
+            requestId,
+          });
+          const result = yield* threads
+            .dispatch({
+              type: "runtime-request.respond",
+              threadId: projection.thread.id,
+              commandId: yield* newCommandId(),
+              requestId,
+              decision,
+            })
+            .pipe(Effect.mapError(dispatchFailure));
+          return { sequence: result.sequence };
+        }
         const answers = yield* required(input.answers, "answers");
         const { threads, projection } = yield* readQuestion({
           threadId: input.threadId,
