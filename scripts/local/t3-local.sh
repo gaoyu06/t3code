@@ -4,7 +4,8 @@
 #   t3-local.sh install         退出 T3、备份并替换 /Applications 里的应用、重新打开
 set -euo pipefail
 
-REPO="$HOME/dev/t3code"
+# 默认用主检出；它被别的会话占用时，可以用 T3_LOCAL_REPO 指向一个检出了 personal 的 worktree。
+REPO="${T3_LOCAL_REPO:-$HOME/dev/t3code}"
 BRANCH="personal"
 OUT="$REPO/release-local"
 APP_NAME="T3 Code (Beta)"
