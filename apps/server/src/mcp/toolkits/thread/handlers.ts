@@ -119,7 +119,9 @@ const readApproval = Effect.fn("mcp.readApproval")(function* (input: {
   threadId?: ThreadId | undefined;
   requestId: RuntimeRequestId;
 }) {
-  const context = yield* readThread(input.threadId, ["runtimeRequests", "turnItems"]);
+  const context = yield* readThread(input.threadId, ["runtimeRequests", "turnItems"], {
+    turnItemTypes: ["approval_request"],
+  });
   const request = context.projection.runtimeRequests.find(
     (request) => request.id === input.requestId && APPROVAL_KINDS.has(request.kind),
   );
